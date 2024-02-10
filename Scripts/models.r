@@ -1,10 +1,11 @@
-# Load Gini data
-gini_data <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_TraitInequality/Data/csv/gini_data.csv")
-gini_distribution <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_TraitInequality/Data/csv/gini_distributions.csv")
-
 # Load the necessary packages
 library(dplyr)
 library(ggplot2)
+library(wesanderson)
+
+# Load Gini data
+gini_data <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_TraitInequality/Data/csv/gini_data.csv")
+gini_distribution <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_TraitInequality/Data/csv/gini_distributions.csv")
 
 # Create a list of the column names from column 7 to the end
 gini_traits <- colnames(gini_results)[7:ncol(gini_results)]

@@ -1,35 +1,13 @@
-# Load Gini gini_data
-gini_data<- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_TraitInequality/Data/csv/gini_data.csv")
-
-if (!require(nortest)) {
-    install.packages("nortest")
-}
-
-if (!require(car)) {
-    install.packages("car")
-}
-
-if (!require(readr)) {
-    install.packages("readr")
-}
-
-if (!require(Rmisc)) {
-    install.packages("Rmisc")
-}
-
-if (!require(psych)) {
-    install.packages("psych")
-}
-
-if (!require(fitdistrplus)) {
-    install.packages("fitdistrplus")
-}
+#Load Packages
 library(nortest)
 library(car)
 library(readr)
 library(Rmisc)
 library(psych)
 library(fitdistrplus)
+
+# Load Gini gini_data
+gini_data<- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_TraitInequality/Data/csv/gini_data.csv")
 
 # Create a list of the column names from column 7 to the end
 gini_traits <- colnames(gini_results)[7:ncol(gini_results)]

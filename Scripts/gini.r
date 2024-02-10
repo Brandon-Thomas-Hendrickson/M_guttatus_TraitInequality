@@ -1,7 +1,3 @@
-# Install the necessary packages if not already installed
-if (!require(dplyr)) install.packages('dplyr')
-if (!require(ineq)) install.packages('ineq')
-
 # Load the ineq package
 library(dplyr)
 library(ineq)
