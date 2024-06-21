@@ -3,6 +3,7 @@ library(dplyr)
 library(ineq)
 library(ggplot2)
 library(ggpubr)
+library(data.table)
 
 ############################################
 #Calculate GINI coefficients for each Trait#
@@ -360,7 +361,7 @@ gini_data <- gini_data %>%
   mutate(Gini_Category_Biomass = ifelse(Gini_Index_veg_weight > median_gini_index, "Above Median", "Below Median"))
 
 #Extract only the plot, tray, Gini_Category_Height, Gini_Category_Biomass
-gini_smalls <- gini_data[c("plot","Tray","Gini_Category_Height","Gini_Category_Biomass")]
+gini_smalls <- gini_data[c("POS","Tray","Final_Density","Fitness_Rank","Gini_Category_Height","Gini_Category_Biomass")]
 
 #Write out the dataframe 
 write.csv(gini_smalls, file = "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_TraitInequality/Data/csv/gini_ranks.csv", row.names = FALSE)
@@ -370,869 +371,564 @@ write.csv(gini_smalls, file = "/Users/brandonhendrickson/Documents/Github_Projec
 #############################################################################################
 
 #Extract Means of Height and Biomass for each Fitness Rank
-# Create the trait List
-trait_list <- c("yield","flower_number_1", "D2Flowering", "ff_height", "total_node_number", "prop_early_growth", "final_height","flower_area", "leaf_area","Huber_Volume")
-
-# Load modelframe
-data <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/raw_data.csv")
-
+gini_data <- gini_data[!is.na(gini_data$Tray), ]
+gini_data$Tray <- as.factor(gini_data$Tray)
 # Make a column of the fitness rank for each block and tray
-data <- data %>%
+gini_data <- gini_data %>%
     group_by(POS, Tray) %>%
-    mutate(Fitness_Rank = rank(-yield))
+    mutate(Fitness_Rank = base::rank(-yield, ties.method = "first"))
 
-# Initialize an empty data frame
-results <- data.frame(Trait = character(), Fitness = character(), Estimate = numeric(), P_Value = numeric(), R_Squared = numeric(), F_Statistic = numeric(), SE = numeric())
-
-for (trait in trait_list) {
-    for (fitness in unique(data$Fitness_Rank)) {
-        mean <- lm(data[data$Fitness_Rank == fitness, trait] ~ data[data$Fitness_Rank == fitness, "Final_Density"], data = data[data$Fitness_Rank == fitness, ])
-        mean_list_FD[[paste(fitness, trait, sep = "_")]] <- mean
-
-        # Extract the model estimate for the trait
-        estimate <- coef(mean)[2]
-
-        # Extract the model summary
-        summary_mean <- summary(mean)
-
-        # Extract the p-value, Sum Sq, F statistic, and R2
-        p_value <- summary_mean$coefficients[2, 4]
-        SE <- summary_mean$coefficients[2, 2]
-        r_squared <- summary_mean$r.squared
-
-        # Add the result into the data frame
-        results <- rbind(results, data.frame(Trait = trait, Fitness = as.character(fitness), Estimate = estimate, P_Value = p_value, SE = sum_sq, F_Statistic = f_statistic, R_Squared = r_squared))
-    }
-}
-
-# Save the data
-write.csv(results, "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/phenotypic_means_responses.csv", row.names = FALSE)
-
-#Standardize the data for each fitness rank
+#Standardize the gini_data for each fitness rank
 
 # Create the trait List
 trait_list <- c("flower_number_1", "D2Flowering", "ff_height", "total_node_number", "prop_early_growth", "final_height","flower_area", "leaf_area","Huber_Volume")
 
 # Change Final Density to Factor
-data$Final_Density <- as.factor(data$Final_Density)
+gini_data$Final_Density <- as.factor(gini_data$Final_Density)
 
 # Modify the function to standardize a single trait
-standardize <- function(data, trait) {
-  data <- data %>%
+standardize <- function(gini_data, trait) {
+  gini_data <- gini_data %>%
     group_by(Fitness_Rank, Final_Density) %>%
-    mutate(!!paste0(trait, "_std") := ( .data[[trait]] - mean(.data[[trait]], na.rm = TRUE)) / sd(.data[[trait]], na.rm = TRUE))
-  return(data)
+    mutate(!!paste0(trait, "_std") := (.data[[trait]] - mean(.data[[trait]], na.rm = TRUE)) / sd(.data[[trait]], na.rm = TRUE))
+  return(gini_data)
 }
 
 # Apply the function to all elements in the trait list
 for (trait in trait_list) {
-    data <- standardize(data, trait)
+    gini_data <- standardize(gini_data, trait)
 }
 
-# Save the data
-write.csv(data, "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_TraitInequality/Data/csv/standardized_data.csv", row.names = FALSE)
+# Create a gini_dataframe to store the results
+results <- data.frame()
+#Calculate Phenotypic Selection Coefficients for each trait and fitness_rank
+for(trait in trait_list){
+    for(i in 1:7){
+        for (q in 1:i) {
+            # Subset the gini_data for the current fitness rank
+            gini_data_subset <- subset(gini_data, Fitness_Rank == q & Final_Density == i)
+            # Fit a linear model
+            model <- lm(as.formula(paste(trait, "_std ~ yield", sep = "")), data = gini_data_subset)
+
+            # Extract the values
+            model_summary <- summary(model)
+            estimate <- coef(model_summary)["yield", "Estimate"]
+            std_error <- coef(model_summary)["yield", "Std. Error"]
+            p_value <- coef(model_summary)["yield", "Pr(>|t|)"]
+            f_statistic <- model_summary$fstatistic[1]
+            r_squared <- model_summary$r.squared
+
+            # Add the results to the gini_data frame
+            results <- rbind(results, data.frame(Trait = trait, Fitness_Rank = q, Final_Density = i, Estimate = estimate, Std_Error = std_error, P_Value = p_value, F_Statistic = f_statistic, R_Squared = r_squared))
+        }
+    }
+}
+
+rank <- summarySE(results, measurevar = "Estimate", groupvars = c("Trait", "Fitness_Rank"))
+
+# Run Linear Regression to Determine if Estimates are sigificantly different between fitness_ranks
+# Initialize an empty gini_dataframe to store trait names and their p-values
+p_values_df <- data.frame(Trait = character(), P_Value = numeric(), stringsAsFactors = FALSE)
+
+for(i in trait_list){
+    model <- lm(as.formula(paste("Estimate ~ Fitness_Rank", sep = "")), data = rank[rank$Trait == i,])
+    # Extract the p-value for the Fitness_Rank coefficient
+    p_value <- summary(model)$coefficients["Fitness_Rank", 4]
+    # Append the trait and p-value to the gini_dataframe
+    p_values_df <- rbind(p_values_df, data.frame(Trait = i, P_Value = p_value))
+}
+
+# Print the gini_dataframe to see the p-values
+print(p_values_df)
+
+###############################################################
+#Calculate Selection Coefficient for Ranked Height and Biomass#
+###############################################################
+#Extract Means of Height and Biomass for each Fitness Rank
+
+gini_data <- gini_data[!is.na(gini_data$Tray), ]
+gini_data$Tray <- as.factor(gini_data$Tray)
+# Make a column of the fitness rank for each block and tray
+gini_data <- gini_data %>%
+    group_by(POS, Tray) %>%
+    mutate(Height_Rank = base::rank(-final_height, ties.method = "first"))
+
+gini_data <- gini_data %>%
+    group_by(POS, Tray) %>%
+    mutate(Veg_Rank = base::rank(-veg_weight, ties.method = "first"))
+# Standardize the gini_data for each fitness rank
+
+# Create the trait List
+trait_list <- c("final_height")
+
+# Change Final Density to Factor
+gini_data$Final_Density <- as.factor(gini_data$Final_Density)
+
+# Modify the function to standardize a single trait
+standardize <- function(gini_data, trait) {
+  gini_data <- gini_data %>%
+    group_by(Height_Rank, Final_Density) %>%
+    mutate(!!paste0(trait, "_std_by_Height") := (.data[[trait]] - mean(.data[[trait]], na.rm = TRUE)) / sd(.data[[trait]], na.rm = TRUE))
+  return(gini_data)
+}
+
+# Apply the function to all elements in the trait list
+for (trait in trait_list) {
+    gini_data <- standardize(gini_data, trait)
+}
+
+standardize <- function(gini_data, trait) {
+    gini_data <- gini_data %>%
+        group_by(Veg_Rank, Final_Density) %>%
+        mutate(!!paste0(trait, "_std_by_Biomass") := (.data[[trait]] - mean(.data[[trait]], na.rm = TRUE)) / sd(.data[[trait]], na.rm = TRUE))
+    return(gini_data)
+}
+
+for (trait in trait_list) {
+    gini_data <- standardize(gini_data, trait)
+}
+
+trait_list <- list("final_height")
+# Create a gini_dataframe to store the results
+results <- data.frame()
+storeResults <- function() {
+    model_summary <- summary(model)
+    estimate <- coef(model_summary)["final_height_std_by_Height", "Estimate"]
+    std_error <- coef(model_summary)["final_height_std_by_Height", "Std. Error"]
+    p_value <- coef(model_summary)["final_height_std_by_Height", "Pr(>|t|)"]
+    f_statistic <- model_summary$fstatistic[1]
+    r_squared <- model_summary$r.squared
+    # Add the results to the gini_data frame
+    results <<- rbind(results, data.frame(Trait = trait, Gini_Category_Height = m, Height_Rank = q, Final_Density = i, Estimate = estimate, Std_Error = std_error, P_Value = p_value, F_Statistic = f_statistic, R_Squared = r_squared))
+}
+# Calculate Phenotypic Selection Coefficients for each trait and fitness_rank
+for(trait in trait_list){
+    for(i in 1:7){
+        for (q in 1:i) {
+            if (i > 1) {
+                # Only apply Gini_Category_Height for Final_Density > 1
+                for (m in unique(gini_data$Gini_Category_Height)) {
+                    # Subset the gini_data for the current fitness rank and Gini_Category_Height
+                    gini_data_subset <- subset(gini_data, Height_Rank == q & Final_Density == i & Gini_Category_Height == m)
+                    # Fit a linear model
+                    model <- lm(as.formula(paste("yield ~", trait,"_std_by_Height", sep = "")), data = gini_data_subset)
+                    # Extract and store the values
+                    storeResults()
+                }
+            } else {
+                # For Final_Density == 1, ignore Gini_Category_Height
+                gini_data_subset <- subset(gini_data, Height_Rank == q & Final_Density == i)
+                # Fit a linear model
+                model <- lm(as.formula(paste("yield ~", trait,"_std_by_Height", sep = "")), data = gini_data_subset)
+                # Extract and store the values, setting Gini as NA or a placeholder
+                m <- NA  # Or use a placeholder value that indicates this condition
+                storeResults()
+            }
+        }
+    }
+}
+
+trait_list <- list("veg_weight")
+# Create a gini_dataframe to store the results_BIOMASS
+results_BIOMASS <- data.frame()
+storeresults_BIOMASS <- function() {
+    model_summary <- summary(model)
+    estimate <- coef(model_summary)["veg_weight_std_by_Biomass", "Estimate"]
+    std_error <- coef(model_summary)["veg_weight_std_by_Biomass", "Std. Error"]
+    p_value <- coef(model_summary)["veg_weight_std_by_Biomass", "Pr(>|t|)"]
+    f_statistic <- model_summary$fstatistic[1]
+    r_squared <- model_summary$r.squared
+    # Add the results_BIOMASS to the gini_data frame
+    results_BIOMASS <<- rbind(results_BIOMASS, data.frame(Trait = trait, Gini_Category_Biomass = m, Veg_Rank = q, Final_Density = i, Estimate = estimate, Std_Error = std_error, P_Value = p_value, F_Statistic = f_statistic, R_Squared = r_squared))
+}
+# Calculate Phenotypic Selection Coefficients for each trait and fitness_rank
+for(trait in trait_list){
+    for(i in 1:7){
+        for (q in 1:i) {
+            if (i > 1) {
+                # Only apply Gini_Category_Height for Final_Density > 1
+                for (m in unique(gini_data$Gini_Category_Biomass)) {
+                    # Subset the gini_data for the current fitness rank and Gini_Category_Height
+                    gini_data_subset <- subset(gini_data, Veg_Rank == q & Final_Density == i & Gini_Category_Biomass == m)
+                    # Fit a linear model
+                    model <- lm(as.formula(paste("yield ~", trait,"_std_by_Biomass", sep = "")), data = gini_data_subset)
+                    # Extract and store the values
+                    storeresults_BIOMASS()
+                }
+            } else {
+                # For Final_Density == 1, ignore Gini_Category_Biomass
+                gini_data_subset <- subset(gini_data, Veg_Rank == q & Final_Density == i)
+                # Fit a linear model
+                model <- lm(as.formula(paste("yield ~", trait,"_std_by_Biomass", sep = "")), data = gini_data_subset)
+                # Extract and store the values, setting Gini as NA or a placeholder
+                m <- NA  # Or use a placeholder value that indicates this condition
+                storeresults_BIOMASS()
+            }
+        }
+    }
+}
+
+checkpls <- summarySE(results, measurevar = "Estimate", groupvars = c("Gini_Category_Height", "Height_Rank"))
+ggplot(checkpls, aes(x = Height_Rank, y = Estimate, color = Gini_Category_Height, group = Gini_Category_Height)) +
+    geom_line() +
+    geom_point()
+
+results_BIOMASS <- results_BIOMASS[results_BIOMASS$Trait == "veg_weight",]
+checkpls_BIOMASS <- summarySE(results_BIOMASS, measurevar = "Estimate", groupvars = c("Gini", "Veg_Rank"))
+ggplot(checkpls, aes(x = Veg_Rank, y = Estimate, color = Gini, group = Gini)) +
+    geom_line() +
+    geom_point()
+
+# Write the results to a CSV file
+write.csv(results, file = "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/phenotype_selection_Height.csv", row.names = FALSE)
+write.csv(results_BIOMASS, file = "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/phenotype_selection_BIOMASS.csv", row.names = FALSE)
+
+
+allele_ready <- merge(gini_data, results, by = c("Final_Density", "Height_Rank", "Gini_Category_Height"))
+allele_ready_BIOMASS <- merge(gini_data, results_BIOMASS, by = c("Final_Density", "Veg_Rank", "Gini_Category_Biomass"))
+
+
 
 ########################################################################################
 # Simulate Change of Allele Frequencies for A Density of 6 at Different Mortality Levels#
 ########################################################################################
 
-# Load Data
-standardized <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_TraitInequality/Data/csv/standardized_data.csv")
-gini_rank <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_TraitInequality/Data/csv/gini_ranks.csv")
-
-# Merge the two dataframes by plot and tray
-data <- merge(standardized, gini_rank, by = c("plot", "Tray"))
 
 # Create a trait list for Final_Height and veg_weight
-trait_list <- c("final_height", "veg_weight")
-
-#Load in Data 
-data <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/phenotype_selection.csv")
-
-# Define the function
-change_in_allele_frequency <- function(P, s, generations) {
-    for (i in 1:generations) {
-        P <- P + s * P * (1 - P)
-    }
-    return(P)
-}
-
-# Initialize an empty dataframe to store the results
-results <- data.frame(Trait = character(), Density = numeric(), Estimate = numeric(), Generations = integer(), Final_Allele_Frequency = numeric(), stringsAsFactors = FALSE)
-P=0.5
-# Loop over the "Estimate" column
-for (i in 1:nrow(data)) {
-    # Get the selection coefficient from the "Estimate" column
-    s <- data$Estimate[i]
-    
-    # Loop over the list of generations
-    for (generations in seq(1,1000,10)) {
-        # Calculate the final allele frequency
-        P_final <- change_in_allele_frequency(P, s, generations)
-        
-        # Add the results to the dataframe
-        results <- rbind(results, data.frame(Trait = data$Trait[i], Density = data$Density[i], Estimate = s, Generations = generations, Final_Allele_Frequency = P_final, stringsAsFactors = FALSE))
-    }
-}
-
-results <- results[results$Density >= 3,]
-# Write Data to CSV
-write.csv(results, "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/allele_frequency.csv", row.names = FALSE)
-
-# Initialize a new dataframe to store the marked rows
-marked_rows <- data.frame()
-
-# Loop over the list of dataframes
-for (trait in names(results)) {
-    # Loop over the unique densities
-    for (density in unique(results$Density)) {
-        # Subset the data for the current density
-        data_density <- subset(results, Density == density)
-        
-        # Initialize a new column Passes_0.99 with FALSE
-        data_density$Passes_0.99 <- FALSE
-            # Loop over the rows of data_density
-            for (i in 2:nrow(data_density)) {
-                if (data_density$Trait[i] == "D2Flowering_std") {
-                    if (data_density$Final_Allele_Frequency[i] < 0.01 && data_density$Final_Allele_Frequency[i - 1] > 0.01) {
-                        # Mark this row
-                        data_density$Passes_0.99[i] <- TRUE
-                    }
-                } else {
-                    # If the current row is greater than 0.99 and the previous row is less than 0.99
-                    if (data_density$Final_Allele_Frequency[i] > 0.99 && data_density$Final_Allele_Frequency[i - 1] < 0.99) {
-                        # Mark this row
-                        data_density$Passes_0.99[i] <- TRUE
-                    }
-                }
-            }
-        # Add the marked rows to the new dataframe
-        marked_rows <- rbind(marked_rows, data_density)
-    }
-}
-
-
-# Split the results dataframe by Trait
-results_by_trait <- split(marked_rows, marked_rows$Trait)
-
-# Assuming results_by_trait is your list of dataframes
-gen <- data.frame()
-
-# Loop over the list of dataframes
-for (trait in names(results_by_trait)) {
-    # Subset the data where Passes_0.99 is TRUE
-    data_subset <- subset(results_by_trait[[trait]], Passes_0.99 == TRUE)
-
-    # Add the subsetted data to the new dataframe
-    gen <- rbind(gen, data_subset)
-}
-
-#Write out generation times for Fixation
-write.csv(gen, "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/generations.csv", row.names = FALSE)
-
-p1 <- ggplot(results_by_trait[["D2Flowering_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() +
-    theme_light() +
-    labs(title = paste("Flowering Date"), x = NULL, y = "Allele Frequency") +
-    scale_color_manual(name = "Density", values = c("#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none", , plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p2 <- ggplot(results_by_trait[["ff_height_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Height @ Flower"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p3 <- ggplot(results_by_trait[["final_height_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Final Height"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p4 <- ggplot(results_by_trait[["flower_number_1_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Flower Number"), x = NULL, y = "Allele Frequency") +
-    scale_color_manual(name = "Density", values = c("#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p5 <- ggplot(results_by_trait[["leaf_area_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Leaf Area"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-p6 <- ggplot(results_by_trait[["Huber_Volume_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Volume"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p7 <- ggplot(results_by_trait[["prop_early_growth_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Early Growth"), x = "Generations", y = "Allele Frequency") +
-    scale_color_manual(name = "Density", values = c("#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p8 <- ggplot(results_by_trait[["total_node_number_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Node Number"), x = "Generations", y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-p9 <- ggplot(results_by_trait[["flower_area_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Flower Area"), x = "Generations", y = NULL) +
-    scale_color_manual(values = c("#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = c(0.8,0.5), plot.title = element_text(hjust = 0.5), legend.title = element_blank()) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")# Arrange the plots into one graphic
-
-
-combined_plot <- ggarrange(p1, p2, p3, p4, p5, p6, p7, p8, p9, ncol = 3, nrow = 3)
-
-ggsave(filename = "allele_frequency.pdf", plot = combined_plot, device = cairo_pdf, width = 8, height = 6)
-##################################################################################################
-## Modify function to include selection coefficient for the Least Fit, Most Fit, and All Plants ##
-##################################################################################################
-
-#Load in Data 
-data <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/phenotype_selection.csv")
-
-# Define the function
-change_in_allele_frequency <- function(P, s1, s2, s3, w1, w2, w3, generations) {
-    for (i in 1:generations) {
-        s <- w1 * s1 + w2 * s2 + w3 * s3  # Calculate the weighted sum of the s values
-        P <- P + s * P * (1 - P)
-    }
-    return(P)
-}
-
-P = 0.5
-# Initialize an empty dataframe to store the results
-results_sub <- data.frame(Trait = character(), Density = numeric(), Estimate = numeric(), Estimate_F = numeric(), Estimate_LF = numeric(), Generations = integer(), Final_Allele_Frequency = numeric(), stringsAsFactors = FALSE)
-
-# Loop over the rows of the data dataframe
-for (i in 1:nrow(data)) {
-    # Only proceed if the Density value is greater than 3
-    if (data$Density[i] >= 3) {
-        # Get the s values from the Estimate, Estimate_F, and Estimate_LF columns
-        s1 <- data$Estimate[i]
-        s2 <- data$Estimate_F[i]
-        s3 <- data$Estimate_LF[i]
-
-        # Calculate the weights
-        density <- data$Density[i]
-        w1 <- (density - 2) / density
-        w2 <- 1 / density
-        w3 <- 1 / density
-
-        # Loop over the list of generations
-        for (generations in seq(1, 1000, 10)) {
-            # Calculate the final allele frequency
-            P_final <- change_in_allele_frequency(P, s1, s2, s3, w1, w2, w3, generations)
-
-            # Add the results to the dataframe
-            results_sub <- rbind(results_sub, data.frame(Trait = data$Trait[i], Density = density, Estimate = s1, Estimate_F = s2, Estimate_LF = s3, Generations = generations, Final_Allele_Frequency = P_final, stringsAsFactors = FALSE))
-        }
-    } else if (data$Density[i] == 2) {
-        # Get the s values from the Estimate, Estimate_F, and Estimate_LF columns
-        s1 <- 0
-        s2 <- data$Estimate_F[i]
-        s3 <- data$Estimate_LF[i]
-
-        # Calculate the weights
-        density <- data$Density[i]
-        w1 <- 0
-        w2 <- 1 / density
-        w3 <- 1 / density
-
-        # Loop over the list of generations
-        for (generations in seq(1, 1000, 10)) {
-            # Calculate the final allele frequency
-            P_final <- change_in_allele_frequency(P, s1, s2, s3, w1, w2, w3, generations)
-
-            # Add the results to the dataframe
-            results_sub <- rbind(results_sub, data.frame(Trait = data$Trait[i], Density = density, Estimate = s1, Estimate_F = s2, Estimate_LF = s3, Generations = generations, Final_Allele_Frequency = P_final, stringsAsFactors = FALSE))
-        }
-    }
-}
-
-#Write out simulation results
-write.csv(results_sub, "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/allele_frequency_stratified.csv", row.names = FALSE)
-
-# Initialize a new dataframe to store the marked rows
-marked_rows_sub <- data.frame()
-
-# Loop over the list of dataframes
-for (trait in names(results_sub)) {
-    # Loop over the unique densities
-    for (density in unique(results_sub$Density)) {
-        # Subset the data for the current density
-        data_density <- subset(results_sub, Density == density)
-        
-        # Initialize a new column Passes_0.99 with FALSE
-        data_density$Passes_0.99 <- FALSE
-            # Loop over the rows of data_density
-            for (i in 2:nrow(data_density)) {
-                if (data_density$Trait[i] == "D2Flowering_std") {
-                    if (data_density$Final_Allele_Frequency[i] < 0.01 && data_density$Final_Allele_Frequency[i - 1] > 0.01) {
-                        # Mark this row
-                        data_density$Passes_0.99[i] <- TRUE
-                    }
-                } else {
-                    # If the current row is greater than 0.99 and the previous row is less than 0.99
-                    if (data_density$Final_Allele_Frequency[i] > 0.99 && data_density$Final_Allele_Frequency[i - 1] < 0.99) {
-                        # Mark this row
-                        data_density$Passes_0.99[i] <- TRUE
-                    }
-                }
-            }
-        # Add the marked rows to the new dataframe
-        marked_rows_sub <- rbind(marked_rows_sub, data_density)
-    }
-}
-
-# Initialize an empty list to store the plots
-plots <- list()
-
-# Split the results dataframe by Trait
-results_by_trait_sub <- split(marked_rows_sub, marked_rows_sub$Trait)
-
-# Assuming results_by_trait_sub is your list of dataframes
-gen <- data.frame()
-
-# Loop over the list of dataframes
-for (trait in names(results_by_trait_sub)) {
-    # Subset the data where Passes_0.99 is TRUE
-    data_subset <- subset(results_by_trait_sub[[trait]], Passes_0.99 == TRUE)
-
-    # Add the subsetted data to the new dataframe
-    gen <- rbind(gen, data_subset)
-}
-
-#Write out generation times for Fixation
-write.csv(gen, "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/generations_stratified.csv", row.names = FALSE)
-
-#Make Graphs
-p1 <- ggplot(results_by_trait_sub[["D2Flowering_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() +
-    theme_light() +
-    labs(title = paste("Flowering Date"), x = NULL, y = "Allele Frequency") +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none", , plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p2 <- ggplot(results_by_trait_sub[["ff_height_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Height @ Flower"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p3 <- ggplot(results_by_trait_sub[["final_height_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Final Height"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p4 <- ggplot(results_by_trait_sub[["flower_number_1_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Flower Number"), x = NULL, y = "Allele Frequency") +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p5 <- ggplot(results_by_trait_sub[["leaf_area_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Leaf Area"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p6 <- ggplot(results_by_trait_sub[["Huber_Volume_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Volume"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p7 <- ggplot(results_by_trait_sub[["prop_early_growth_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Early Growth"), x = "Generations", y = "Allele Frequency") +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p8 <- ggplot(results_by_trait_sub[["total_node_number_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Node Number"), x = "Generations", y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-p9 <- ggplot(results_by_trait_sub[["flower_area_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Flower Area"), x = "Generations", y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = c(0.8,0.5), plot.title = element_text(hjust = 0.5), legend.title = element_blank()) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-# Arrange the plots into one graphic
-combined_plot <- ggarrange(p1,p2,p3,p4,p5,p6,p7,p8,p9, ncol = 3, nrow = 3)
-
-ggsave(filename = "allele_frequency_stratified.pdf", plot = combined_plot, device = cairo_pdf, width = 8, height = 6)
-###################################################################################
-## Modify to Weight the Selection Coefficients by the Number Proportion of Yield ##
-###################################################################################
-
-# Load dataframe
-data <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/standardized_data.csv")
+trait_list <- c("final_height")
 
 # Calculate the average yield for each density and fitness group
-yield_avg <- aggregate(yield ~ Final_Density + F_LF, data = data, FUN = mean)
+yield_avg <- aggregate(yield ~ Final_Density + Height_Rank + Gini_Category_Height, data = allele_ready, FUN = mean)
 
 # Remove Densities of 1 from dataframe
 yield_avg <- yield_avg[yield_avg$Final_Density != 1, ]
 
-
 # Reshape the data
 yield_avg_wide <- yield_avg %>%
-    spread(key = F_LF, value = yield)
+    spread(key = Height_Rank, value = yield)
 
 # Calculate the total yield per row
-yield_avg_wide$total_yield = rowSums(yield_avg_wide[, c("F", "LF", "Other")], na.rm = TRUE)
+yield_avg_wide$total_yield = rowSums(yield_avg_wide[, c("1","2","3","4","5","6","7")], na.rm = TRUE)
 
 # Calculate the proportion of yield for each category
-yield_avg_wide$F_prop = yield_avg_wide$F / yield_avg_wide$total_yield
-yield_avg_wide$LF_prop = yield_avg_wide$LF / yield_avg_wide$total_yield
-yield_avg_wide$Other_prop = yield_avg_wide$Other / yield_avg_wide$total_yield
+yield_avg_wide$Rank_1 = yield_avg_wide$`1` / yield_avg_wide$total_yield
+yield_avg_wide$Rank_2 = yield_avg_wide$`2` / yield_avg_wide$total_yield
+yield_avg_wide$Rank_3 = yield_avg_wide$`3` / yield_avg_wide$total_yield
+yield_avg_wide$Rank_4 = yield_avg_wide$`4` / yield_avg_wide$total_yield
+yield_avg_wide$Rank_5 = yield_avg_wide$`5` / yield_avg_wide$total_yield
+yield_avg_wide$Rank_6 = yield_avg_wide$`6` / yield_avg_wide$total_yield
+yield_avg_wide$Rank_7 = yield_avg_wide$`7` / yield_avg_wide$total_yield
+
 
 # Calculate the row averages
-yield_avg_wide$Avg <- rowMeans(yield_avg_wide[, c("F", "LF", "Other")], na.rm = TRUE)
-
-yield_avg_wide$F_m <- yield_avg_wide$F / ((yield_avg_wide$F + yield_avg_wide$LF + (yield_avg_wide$Other * (yield_avg_wide$Final_Density - 2))) / yield_avg_wide$Final_Density)
-yield_avg_wide$LF_m<-yield_avg_wide$LF/((yield_avg_wide$F + yield_avg_wide$LF + (yield_avg_wide$Other * (yield_avg_wide$Final_Density-2)))/yield_avg_wide$Final_Density)
-yield_avg_wide$Other_m <- yield_avg_wide$Other / ((yield_avg_wide$F + yield_avg_wide$LF + (yield_avg_wide$Other * (yield_avg_wide$Final_Density - 2))) / yield_avg_wide$Final_Density)
-
-
-# Change column name of Final_Density
-colnames(yield_avg_wide)[1] <- "Density"
-
-#Load in Selection Data
-data <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/phenotype_selection.csv")
+yield_avg_wide$Avg <- rowMeans(yield_avg_wide[, c("1","2","3","4","5","6","7")], na.rm = TRUE)
 
 # Merge the two dataframes
-data <- merge(data, yield_avg_wide, by = "Density")
+data <- merge(allele_ready, yield_avg_wide, by = c("Final_Density", "Gini_Category_Height"))
+data_sub <- data[data$Final_Density == 6, ]
+yp <- summarySE(data_sub, measurevar = "yield_proportion", groupvars = c("Final_Density", "Gini_Category_Height", "Height_Rank"))
+es <- summarySE(data_sub, measurevar = "Estimate", groupvars = c("Final_Density", "Gini_Category_Height", "Height_Rank"))
+es_yp <- merge(es, yp, by = c("Final_Density", "Gini_Category_Height", "Height_Rank"))
+es_yp <- es_yp[, c(1, 2, 3, 5, 10)]
+
+# Get the s values from the Estimate
+        s1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+        s2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+        s3 <- es_yp[es_yp$Height_Rank == 3 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+        s4 <- es_yp[es_yp$Height_Rank == 4 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+        s5 <- es_yp[es_yp$Height_Rank == 5 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+        s6 <- es_yp[es_yp$Height_Rank == 6 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+
+        # Add Yield
+        w1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
+        w2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
+        w3 <- es_yp[es_yp$Height_Rank == 3 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
+        w4 <- es_yp[es_yp$Height_Rank == 4 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
+        w5 <- es_yp[es_yp$Height_Rank == 5 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
+        w6 <- es_yp[es_yp$Height_Rank == 6 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
 
 # Define the function
-change_in_allele_frequency <- function(P, s1, s2, s3, w1, w2, w3, generations) {
+change_in_allele_frequency <- function(P, s1, s2, s3, s4,s5,s6, w1, w2, w3, w4,w5,w6, generations) {
     for (i in 1:generations) {
-        s <- w1 * s1 + w2 * s2 + w3 * s3  # Calculate the weighted sum of the s values
+        s <- w1 * s1 + w2 * s2 + w3 * s3 + w4 * s4 + w5 * s5 + w6 * s6 # Calculate the weighted sum of the s values
         P <- P + s * P * (1 - P)
     }
     return(P)
 }
 
 P = 0.5
-# Initialize an empty dataframe to store the results
-results_yield <- data.frame(Trait = character(), Density = numeric(), Estimate = numeric(), Estimate_F = numeric(), Estimate_LF = numeric(), Generations = integer(), Final_Allele_Frequency = numeric(), stringsAsFactors = FALSE)
 
-# Loop over the rows of the data dataframe
-for (i in 1:nrow(data)) {
-    # Only proceed if the Density value is greater than 3
-    if (data$Density[i] >= 3) {
-        # Get the s values from the Estimate, Estimate_F, and Estimate_LF columns
-        s1 <- data$Estimate[i]
-        s2 <- data$Estimate_F[i]
-        s3 <- data$Estimate_LF[i]
+results_yield <- data.frame(Trait = character(), Density = numeric(), Estimate = numeric(), Estimate_F = numeric(), Estimate_LF = numeric(), Generations = integer(), Final_Allele_Frequency = numeric(), stringsAsFactors = FALSE)
+        # Loop over the list of generations
+        for (generations in seq(1, 1000, 1)) {
+            # Calculate the final allele frequency
+            P_final <- change_in_allele_frequency(P, s1, s2, s3, s4,s5,s6,w1, w2, w3, w4,w5,w6, generations)
+
+            # Add the results to the dataframe
+            results_yield <- rbind(results_yield, data.frame(Generations = generations, Final_Allele_Frequency = P_final, stringsAsFactors = FALSE))
+        }
+
+# Get the s values from the Estimate
+        s1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
+        s2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
+        s3 <- es_yp[es_yp$Height_Rank == 3 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
+        s4 <- es_yp[es_yp$Height_Rank == 4 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
+        s5 <- es_yp[es_yp$Height_Rank == 5 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
+        s6 <- es_yp[es_yp$Height_Rank == 6 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
 
         # Add Yield
-        w1 <- data$Other_prop[i]
-        w2 <- data$F_prop[i]
-        w3 <- data$LF_prop[i]
+        w1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
+        w2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
+        w3 <- es_yp[es_yp$Height_Rank == 3 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
+        w4 <- es_yp[es_yp$Height_Rank == 4 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
+        w5 <- es_yp[es_yp$Height_Rank == 5 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
+        w6 <- es_yp[es_yp$Height_Rank == 6 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
 
-        # Loop over the list of generations
-        for (generations in seq(1, 1000, 10)) {
-            # Calculate the final allele frequency
-            P_final <- change_in_allele_frequency(P, s1, s2, s3, w1, w2, w3, generations)
-
-            # Add the results to the dataframe
-            results_yield <- rbind(results_yield, data.frame(Trait = data$Trait[i], Density = data$Density[i], Estimate = s1, Estimate_F = s2, Estimate_LF = s3, Generations = generations, Final_Allele_Frequency = P_final, stringsAsFactors = FALSE))
-        }
-    } else if (data$Density[i] == 2) {
-        # Get the s values from the Estimate, Estimate_F, and Estimate_LF columns
-        s1 <- 0
-        s2 <- data$Estimate_F[i]
-        s3 <- data$Estimate_LF[i]
-
-        # Calculate the weights
-        w1 <- 0
-        w2 <- data$F_prop[i]
-        w3 <- data$LF_prop[i]
-
-        # Loop over the list of generations
-        for (generations in seq(1, 1000, 10)) {
-            # Calculate the final allele frequency
-            P_final <- change_in_allele_frequency(P, s1, s2, s3, w1, w2, w3,generations)
-
-            # Add the results to the dataframe
-            results_yield <- rbind(results_yield, data.frame(Trait = data$Trait[i], Density = data$Density[i], Estimate = s1, Estimate_F = s2, Estimate_LF = s3, Generations = generations, Final_Allele_Frequency = P_final, stringsAsFactors = FALSE))
-        }
+# Define the function
+change_in_allele_frequency <- function(P, s1, s2, s3, s4,s5,s6, w1, w2, w3, w4,w5,w6, generations) {
+    for (i in 1:generations) {
+        s <- w1 * s1 + w2 * s2 + w3 * s3 + w4 * s4 + w5 * s5 + w6 * s6 # Calculate the weighted sum of the s values
+        P <- P + s * P * (1 - P)
     }
+    return(P)
 }
 
+P = 0.5
 
-#Write out simulation results
-write.csv(results_yield, "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/allele_frequency_yield.csv", row.names = FALSE)
+results_yield_Low <- data.frame(Trait = character(), Density = numeric(), Estimate = numeric(), Estimate_F = numeric(), Estimate_LF = numeric(), Generations = integer(), Final_Allele_Frequency = numeric(), stringsAsFactors = FALSE)
+        # Loop over the list of generations
+        for (generations in seq(1, 1000, 1)) {
+            # Calculate the final allele frequency
+            P_final <- change_in_allele_frequency(P, s1, s2, s3, s4, s5, s6, w1, w2, w3, w4, w5, w6, generations)
+
+            # Add the results to the dataframe
+            results_yield_Low <- rbind(results_yield_Low, data.frame(Generations = generations, Final_Allele_Frequency = P_final, stringsAsFactors = FALSE))
+        }
+
+results_yield$Gini_Category_Height <- "Above Median"
+results_yield_Low$Gini_Category_Height <- "Below Median"
+
+results_yield <- rbind(results_yield, results_yield_Low)
+
+ggplot(results_yield,aes(x=Generations,y=Final_Allele_Frequency,color=Gini_Category_Height))+geom_line()
+
+# Repeat with Mortality of 2 and Mortality of 4
+yield_sub <- yield_avg[yield_avg$Final_Density == 6, ]
+do2 <- yield_sub[yield_sub$Height_Rank < 5, ]
+do4 <- yield_sub[yield_sub$Height_Rank < 3, ]
+
+# Reshape the data
+yield_avg_wide_do2 <- do2 %>%
+    spread(key = Height_Rank, value = yield)
+
+# Calculate the total yield per row
+yield_avg_wide_do2$total_yield = rowSums(yield_avg_wide_do2[, c("1","2","3","4")], na.rm = TRUE)
+
+# Calculate the proportion of yield for each category
+yield_avg_wide_do2$Rank_1 = yield_avg_wide_do2$`1` / yield_avg_wide_do2$total_yield
+yield_avg_wide_do2$Rank_2 = yield_avg_wide_do2$`2` / yield_avg_wide_do2$total_yield
+yield_avg_wide_do2$Rank_3 = yield_avg_wide_do2$`3` / yield_avg_wide_do2$total_yield
+yield_avg_wide_do2$Rank_4 = yield_avg_wide_do2$`4` / yield_avg_wide_do2$total_yield
+
+# Reshape the data
+yield_avg_wide_do4 <- do4 %>%
+    spread(key = Height_Rank, value = yield)
+
+# Calculate the total yield per row
+yield_avg_wide_do4$total_yield = rowSums(yield_avg_wide_do4[, c("1","2")], na.rm = TRUE)
+
+# Calculate the proportion of yield for each category
+yield_avg_wide_do4$Rank_1 = yield_avg_wide_do4$`1` / yield_avg_wide_do4$total_yield
+yield_avg_wide_do4$Rank_2 = yield_avg_wide_do4$`2` / yield_avg_wide_do4$total_yield
+
+# Merge the two dataframes
+data <- merge(allele_ready, do4, by = c("Final_Density", "Gini_Category_Height","Height_Rank"))
+data_sub <- data[data$Final_Density == 6, ]
+yp <- summarySE(data_sub, measurevar = "yield_proportion", groupvars = c("Final_Density", "Gini_Category_Height", "Height_Rank"))
+es <- summarySE(data_sub, measurevar = "Estimate", groupvars = c("Final_Density", "Gini_Category_Height", "Height_Rank"))
+es_yp <- merge(es, yp, by = c("Final_Density", "Gini_Category_Height", "Height_Rank"))
+es_yp <- es_yp[, c(1, 2, 3, 5, 10)]
+
+# Get the s values from the Estimate
+        s1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+        s2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+
+        # Add Yield
+        w1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
+        w2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
+
+# Define the function
+change_in_allele_frequency <- function(P, s1, s2, w1, w2, generations) {
+    for (i in 1:generations) {
+        s <- w1 * s1 + w2 * s2 # Calculate the weighted sum of the s values
+        P <- P + s * P * (1 - P)
+    }
+    return(P)
+}
+
+P = 0.5
+
+results_yield_DO4 <- data.frame(Generations = integer(), Final_Allele_Frequency = numeric(), stringsAsFactors = FALSE)
+        # Loop over the list of generations
+        for (generations in seq(1, 1000, 1)) {
+            # Calculate the final allele frequency
+            P_final <- change_in_allele_frequency(P, s1, s2, w1, w2, generations)
+
+            # Add the results to the dataframe
+            results_yield_DO4 <- rbind(results_yield_DO4, data.frame(Generations = generations, Final_Allele_Frequency = P_final, stringsAsFactors = FALSE))
+        }
+
+# Get the s values from the Estimate
+        s1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
+        s2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
+
+        # Add Yield
+        w1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
+        w2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
+
+# Define the function
+change_in_allele_frequency <- function(P, s1, s2, w1, w2,generations) {
+    for (i in 1:generations) {
+        s <- w1 * s1 + w2 * s2  # Calculate the weighted sum of the s values
+        P <- P + s * P * (1 - P)
+    }
+    return(P)
+}
+
+P = 0.5
+
+results_yield_DO4_Low <- data.frame(Generations = integer(), Final_Allele_Frequency = numeric(), stringsAsFactors = FALSE)
+        # Loop over the list of generations
+        for (generations in seq(1, 1000, 1)) {
+            # Calculate the final allele frequency
+            P_final <- change_in_allele_frequency(P, s1, s2, w1, w2, generations)
+
+            # Add the results to the dataframe
+            results_yield_DO4_Low <- rbind(results_yield_DO4_Low, data.frame(Generations = generations, Final_Allele_Frequency = P_final, stringsAsFactors = FALSE))
+        }
+
+results_yield_DO4$Gini_Category_Height <- "Above Median"
+results_yield_DO4_Low$Gini_Category_Height <- "Below Median"
+
+results_yield_DO4 <- rbind(results_yield_DO4, results_yield_DO4_Low)
+
+ggplot(results_yield_DO4,aes(x=Generations,y=Final_Allele_Frequency,color=Gini_Category_Height))+geom_line()
+
+# Repeat with Mortality of 2
+# Merge the two dataframes
+data <- merge(allele_ready, do2, by = c("Final_Density", "Gini_Category_Height","Height_Rank"))
+data_sub <- data[data$Final_Density == 6, ]
+yp <- summarySE(data_sub, measurevar = "yield_proportion", groupvars = c("Final_Density", "Gini_Category_Height", "Height_Rank"))
+es <- summarySE(data_sub, measurevar = "Estimate", groupvars = c("Final_Density", "Gini_Category_Height", "Height_Rank"))
+es_yp <- merge(es, yp, by = c("Final_Density", "Gini_Category_Height", "Height_Rank"))
+es_yp <- es_yp[, c(1, 2, 3, 5, 10)]
+# Get the s values from the Estimate
+        s1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+        s2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+        s3 <- es_yp[es_yp$Height_Rank == 3 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+        s4 <- es_yp[es_yp$Height_Rank == 4 & es_yp$Gini_Category_Height == "Above Median", "Estimate"]
+        # Add Yield
+        w1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
+        w2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
+        w3 <- es_yp[es_yp$Height_Rank == 3 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
+        w4 <- es_yp[es_yp$Height_Rank == 4 & es_yp$Gini_Category_Height == "Above Median", "yield_proportion"]
+
+# Define the function
+change_in_allele_frequency <- function(P, s1, s2, s3,s4,w1, w2, w3,w4,generations) {
+    for (i in 1:generations) {
+        s <- w1 * s1 + w2 * s2 +w3 * s3 + w4 * s4 # Calculate the weighted sum of the s values
+        P <- P + s * P * (1 - P)
+    }
+    return(P)
+}
+
+P = 0.5
+
+results_yield_DO2 <- data.frame(Generations = integer(), Final_Allele_Frequency = numeric(), stringsAsFactors = FALSE)
+        # Loop over the list of generations
+        for (generations in seq(1, 1000, 1)) {
+            # Calculate the final allele frequency
+            P_final <- change_in_allele_frequency(P, s1, s2, s3,s4,w1, w2, w3,w4,generations)
+
+            # Add the results to the dataframe
+            results_yield_DO2 <- rbind(results_yield_DO2, data.frame(Generations = generations, Final_Allele_Frequency = P_final, stringsAsFactors = FALSE))
+        }
+
+# Get the s values from the Estimate
+        s1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
+        s2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
+        s3 <- es_yp[es_yp$Height_Rank == 3 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
+        s4 <- es_yp[es_yp$Height_Rank == 4 & es_yp$Gini_Category_Height == "Below Median", "Estimate"]
+        # Add Yield
+        w1 <- es_yp[es_yp$Height_Rank == 1 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
+        w2 <- es_yp[es_yp$Height_Rank == 2 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
+        w3 <- es_yp[es_yp$Height_Rank == 3 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
+        w4 <- es_yp[es_yp$Height_Rank == 4 & es_yp$Gini_Category_Height == "Below Median", "yield_proportion"]
+
+# Define the function
+change_in_allele_frequency <- function(P, s1, s2, s3,s4,w1, w2, w3,w4,generations) {
+    for (i in 1:generations) {
+        s <- w1 * s1 + w2 * s2  # Calculate the weighted sum of the s values
+        P <- P + s * P * (1 - P)
+    }
+    return(P)
+}
+
+P = 0.5
+
+results_yield_DO2_Low <- data.frame(Generations = integer(), Final_Allele_Frequency = numeric(), stringsAsFactors = FALSE)
+        # Loop over the list of generations
+        for (generations in seq(1, 1000, 1)) {
+            # Calculate the final allele frequency
+            P_final <- change_in_allele_frequency(P, s1, s2, s3,s4,w1, w2, w3,w4,generations)
+
+            # Add the results to the dataframe
+            results_yield_DO2_Low <- rbind(results_yield_DO2_Low, data.frame(Generations = generations, Final_Allele_Frequency = P_final, stringsAsFactors = FALSE))
+        }
+
+results_yield_DO2$Gini_Category_Height <- "Above Median"
+results_yield_DO2_Low$Gini_Category_Height <- "Below Median"
+
+results_yield_DO2 <- rbind(results_yield_DO2, results_yield_DO2_Low)
+
+ggplot(results_yield_DO2,aes(x=Generations,y=Final_Allele_Frequency,color=Gini_Category_Height))+geom_line()
+
+# Combine All Runs
+results_yield_DO2$Mortality <- "Medium"
+results_yield_DO4$Mortality <- "High"
+results_yield$Mortality <- "Low"
+
+results_yield <- rbind(results_yield_DO2, results_yield_DO4, results_yield)
+
 
 # Initialize a new dataframe to store the marked rows
 marked_rows_yield <- data.frame()
 
 # Loop over the list of dataframes
-for (trait in names(results_yield)) {
+for (ineq in unique(results_yield$Gini_Category_Height)) {
     # Loop over the unique densities
-    for (density in unique(results_yield$Density)) {
+    for (mort in unique(results_yield$Mortality)) {
         # Subset the data for the current density
-        data_density <- subset(results_yield, Density == density)
-        
+        data_density <- subset(results_yield, Gini_Category_Height == ineq & Mortality == mort)
+
         # Initialize a new column Passes_0.99 with FALSE
         data_density$Passes_0.99 <- FALSE
-            # Loop over the rows of data_density
-            for (i in 2:nrow(data_density)) {
-                if (data_density$Trait[i] == "D2Flowering_std") {
-                    if (data_density$Final_Allele_Frequency[i] < 0.01 && data_density$Final_Allele_Frequency[i - 1] > 0.01) {
-                        # Mark this row
-                        data_density$Passes_0.99[i] <- TRUE
-                    }
-                } else {
-                    # If the current row is greater than 0.99 and the previous row is less than 0.99
-                    if (data_density$Final_Allele_Frequency[i] > 0.99 && data_density$Final_Allele_Frequency[i - 1] < 0.99) {
-                        # Mark this row
-                        data_density$Passes_0.99[i] <- TRUE
-                    }
-                }
+        # Loop over the rows of data_density
+        for (i in 2:nrow(data_density)) {
+            # If the current row is greater than 0.99 and the previous row is less than 0.99
+            if (data_density$Final_Allele_Frequency[i] > 0.99 && data_density$Final_Allele_Frequency[i - 1] < 0.99) {
+                # Mark this row
+                data_density$Passes_0.99[i] <- TRUE
             }
+        }
         # Add the marked rows to the new dataframe
         marked_rows_yield <- rbind(marked_rows_yield, data_density)
     }
 }
 
-# Initialize an empty list to store the plots
-plots <- list()
-
-# Split the results dataframe by Trait
-results_by_trait_yield <- split(marked_rows_yield, marked_rows_yield$Trait)
-
-# Assuming results_by_trait_yield is your list of dataframes
-gen <- data.frame()
-
-# Loop over the list of dataframes
-for (trait in names(results_by_trait_yield)) {
-    # Subset the data where Passes_0.99 is TRUE
-    data_subset <- subset(results_by_trait_yield[[trait]], Passes_0.99 == TRUE)
-
-    # Add the subsetted data to the new dataframe
-    gen <- rbind(gen, data_subset)
-}
-
-#Write out generation times for Fixation
-write.csv(gen, "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/generations_yield.csv", row.names = FALSE)
-
-#Make Graphs
-p1 <- ggplot(results_by_trait_yield[["D2Flowering_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() +
-    theme_light() +
-    labs(title = paste("Flowering Date"), x = NULL, y = "Allele Frequency") +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none", , plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "D2Flowering_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
 
 
-p2 <- ggplot(results_by_trait_yield[["ff_height_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Height @ Flower"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "ff_height_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
 
-
-p3 <- ggplot(results_by_trait_yield[["final_height_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Final Height"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "final_height_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p4 <- ggplot(results_by_trait_yield[["flower_number_1_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Flower Number"), x = NULL, y = "Allele Frequency") +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_number_1_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p5 <- ggplot(results_by_trait_yield[["leaf_area_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Leaf Area"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "leaf_area_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p6 <- ggplot(results_by_trait_yield[["Huber_Volume_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Volume"), x = NULL, y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "Huber_Volume_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p7 <- ggplot(results_by_trait_yield[["prop_early_growth_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Early Growth"), x = "Generations", y = "Allele Frequency") +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "prop_early_growth_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-
-p8 <- ggplot(results_by_trait_yield[["total_node_number_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Node Number"), x = "Generations", y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = "none",, plot.title = element_text(hjust = 0.5)) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "total_node_number_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-
-p9 <- ggplot(results_by_trait_yield[["flower_area_std"]], aes(x = Generations, y = Final_Allele_Frequency, group = factor(Density), color = factor(Density))) +
-    geom_line() + theme_light() + 
-    labs(title = paste("Flower Area"), x = "Generations", y = NULL) +
-    scale_color_manual(name = "Density", values = c("#0e0325","#0ac9db", "blue", "purple", "red", "magenta")) +
-    theme(legend.position = c(0.8,0.5), plot.title = element_text(hjust = 0.5), legend.title = element_blank()) +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 2, "Generations"][1]), linetype = "dashed", color = "#0e0325") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 3, "Generations"][1]), linetype = "dashed", color = "#0ac9db") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 4, "Generations"][1]), linetype = "dashed", color = "blue") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 5, "Generations"][1]), linetype = "dashed", color = "purple") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 6, "Generations"][1]), linetype = "dashed", color = "red") +
-    geom_vline(aes(xintercept = gen[gen$Trait == "flower_area_std" & gen$Density == 7, "Generations"][1]), linetype = "dashed", color = "magenta")
-# Arrange the plots into one graphic
-combined_plot <- ggarrange(p1,p2,p3,p4,p5,p6,p7,p8,p9, ncol = 3, nrow = 3)
-
-ggsave(filename = "allele_frequency_yield.pdf", plot = combined_plot, device = cairo_pdf, width = 8, height = 6)
-#################################################################
-## Compare Fixation Times between Stratified and All Selection ##
-#################################################################
-
-# Load in data
-all <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/generations.csv")
-strat <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/generations_stratified.csv")
-yield <- read.csv("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/generations_yield.csv")
-
-trait_list <- c("flower_number_1_std", "D2Flowering_std", "ff_height_std", "total_node_number_std", "prop_early_growth_std", "final_height_std","flower_area_std", "leaf_area_std","Huber_Volume_std")
-
-# Add Type to the two datasets
-all$Type <- "All"
-strat$Type <- "Stratified"
-yield$Type <- "Yield"
-
-# Add Two Empty Columns to All
-all$Estimate_F <- NA
-all$Estimate_LF <- NA
-
-# Combine the two datasets
-combined <- rbind(all, strat, yield)
-
-combined<-unique(combined)
-
-# Save out combined data
-write.csv(combined, "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Data/csv/generations_combined.csv", row.names = FALSE)
-
-# Run a simple anova to compare the two datasets
-anova_df <- data.frame(Predictors = character(), Df = numeric(), Sum_Sq = numeric(), F_value = numeric(), Pr = numeric(), Response = character(), stringsAsFactors = FALSE)
-for(trait in trait_list){
-    anova <- anova(lm(Generations ~ Type + Density + Type * Density, data = combined[combined$Trait == trait, ]))
-    anova$Predictors <- rownames(anova)
-    anova <- anova[,c(6,1,2,4,5)]
-    anova$Response <- ifelse(anova$Predictors == "Type", trait, NA)
-    anova_df <- rbind(anova_df,anova)
-}
-
-anova_df <- anova_df %>%
-    mutate(Response = case_when(
-        Response == trait_list[2] ~ "Flowering Date",
-        Response == trait_list[3] ~ "Height at Flowering",
-        Response == trait_list[6] ~ "Final Height",
-        Response == trait_list[1] ~ "# Flowers",
-        Response == trait_list[8] ~ "Leaf Area",
-        Response == trait_list[5] ~ "Early Growth",
-        Response == trait_list[4] ~ "Node Number",
-        Response == trait_list[7] ~ "Flower Area",
-        TRUE ~ Response
-    ))
-
-anova_df <- anova_df[, c(6, 1, 2, 3, 4, 5)]
-
-# Create a dataframe of the anova results
-tab_df(anova_df,file = "/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Results/anova_results_SIM.doc")
-
-p <- ggplot(combined, aes(x = Trait, y = Generations, fill = Type)) +
-    geom_boxplot() +
-    theme_light(base_size = 12, base_family = "Times New Roman") +
-    labs(x = NULL, y = "Generations", title = NULL) +
-    scale_x_discrete(labels = c("Flowering\nDate", "Height at\nFlowering", "Final\nHeight", "# Flowers", "Leaf\nArea", "Early\nGrowth", "Node\nNumber", "Flower Area","Volume")) +
-    theme(legend.position = c(0.85, 0.8), axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12), legend.text = element_text(size = 12)) +
-    scale_fill_manual(values = c("#7171ef", "#c477f3", "#f265a4"), labels = c("Average Selection", "Proportional Weighting", "Yield Weighting"))
-# Save the plot#5555f1
-ggsave("/Users/brandonhendrickson/Documents/Github_Projects/M_guttatus_PhenotypicSelection/Results/fixation_comparison.pdf", p, width = 10, height = 6, units = "in", dpi = 300, device = cairo_pdf)
 
 
 
